@@ -236,7 +236,10 @@ def recognize_board(rectified, templates, cell, margin, repair=True):
     board_rows = _enforce_counts(
         board_rows, lambda r, f: confidences[r * FILES + f], score_maps
     )
-    board_rows = _deficit_swap(board_rows, score_maps)
+    # 注意：_deficit_swap 已停用。它在「窗口串味」的格子上会连续误改
+    # （实测屏幕 (1,1) 本是空格，窗口把邻格棋子圈进来导致四个候选都 0.7+，
+    # 先被数量纠错改成马、再被补缺改成车，越改越错）。用户报的「车被读成炮」
+    # 那格本身读得是对的。宁可少纠，不可乱纠——留函数体备查，不接主流程。
     board_rows = _ensure_kings(board_rows, occ, score_maps)
     return board_rows, confidences
 
@@ -354,7 +357,7 @@ def _ensure_kings(rows, occ, score_maps):
             grid[best[1]][best[2]] = king
     return ["".join(row) for row in grid]
 
-def _deficit_swap(rows, score_maps, max_gap=0.06):
+def _deficit_swap(rows, score_maps, max_gap=0.04, min_score=0.62):
     """某方某类棋子「没满」时，把同类里已满、且分数几乎打平的那格改判过来。
 
     实测红方 (7,5) 的车被读成炮：R 0.72 / C 0.74，红方于是「车 1、炮 2」——
@@ -388,7 +391,13 @@ def _deficit_swap(rows, score_maps, max_gap=0.06):
                             continue
                         idx = r * FILES + f
                         sc = (score_maps[idx] or {}) if idx < len(score_maps) else {}
-                        gap = sc.get(cur, 0.0) - sc.get(want, 0.0)
+                        want_sc = sc.get(want, 0.0)
+                        # 缺的那类在这格的分数必须本身够高：实测幻觉棋子的分
+                        # 只有 0.1~0.3，而真棋子 0.7+。不加这道门槛会把「空位上
+                        # 凭空造出来的马」再改判成车，越改越错。
+                        if want_sc < min_score:
+                            continue
+                        gap = sc.get(cur, 0.0) - want_sc
                         if gap > max_gap:
                             continue
                         if best is None or gap < best[0]:
