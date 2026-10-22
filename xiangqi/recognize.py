@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from .board import MAX_PIECES, sanitize_positions
+from .board import LEGAL_SPOTS_ANY, MAX_PIECES, sanitize_positions
 from .calibrate import FILES, RANKS
 from .occupancy import occupancy_map
 
@@ -231,11 +231,14 @@ def recognize_board(rectified, templates, cell, margin, repair=True):
         board_rows.append(row)
     if repair:
         board_rows = repair_counts(board_rows, score_maps)
-    # repair 会在同色格之间互改，可能把士挪到九宫外，所以合法性清理放最后
-    board_rows, _ = sanitize_positions(board_rows)
+    # repair 会在同色格之间互改，可能把士挪到九宫外。顺序很关键：
+    # ① 数量超限先改判/清理 → ② 位置非法的先尝试改判（别直接删，否则凭空少子）
+    # → ③ 最后才做合法性兜底清理。
     board_rows = _enforce_counts(
         board_rows, lambda r, f: confidences[r * FILES + f], score_maps
     )
+    board_rows = _rescue_illegal(board_rows, score_maps)
+    board_rows, _ = sanitize_positions(board_rows)
     return board_rows, confidences
 
 
@@ -324,3 +327,34 @@ def _deficit_target(rows, ch, score_maps, r, f):
         if sc > best_score and sc >= REBALANCE_MIN_SCORE:
             best, best_score = cand, sc
     return best
+
+def _rescue_illegal(rows, score_maps, min_score=REBALANCE_MIN_SCORE):
+    """位置非法的棋子先试着「改判」，别急着删。
+
+    实测：红车被认成「仕」，而仕落在列 0 不合法，`sanitize_positions` 直接清掉，
+    盘面上就凭空少一个车（用户一眼看出）。但那一格的次选正是「车」（0.84 vs 0.85），
+    位置也合法——直接改判就还原了。改判不了才清空。
+    """
+    for r in range(RANKS):
+        for f in range(FILES):
+            ch = rows[r][f]
+            if ch == " ":
+                continue
+            spots = LEGAL_SPOTS_ANY.get(ch)
+            if spots is None or (r, f) in spots:
+                continue
+            sc = score_maps[r * FILES + f] or {}
+            best, best_sc = None, 0.0
+            for alt, val in sc.items():
+                if alt == " " or alt == ch:
+                    continue
+                alt_spots = LEGAL_SPOTS_ANY.get(alt)
+                if alt_spots is not None and (r, f) not in alt_spots:
+                    continue
+                # 只在同色之间改判：红黑互换是另一类错误，不该在这里悄悄发生
+                if alt.isupper() != ch.isupper():
+                    continue
+                if val > best_sc and val >= min_score:
+                    best, best_sc = alt, val
+            rows[r][f] = best if best else " "
+    return rows

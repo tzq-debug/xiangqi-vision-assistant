@@ -83,6 +83,30 @@ def glare_ratio(rect, cell, margin, r, f, frac=OCCUPANCY_FRAC, level=245):
     return float((gray >= level).mean())
 
 
+def texture_variance(rect, cell, margin, r, f, frac=OCCUPANCY_FRAC):
+    """格中心区的拉普拉斯方差——「这格有没有棋子」的主判据。
+
+    棋子带字、带立体边缘，高频细节极强；空位是平滑的棋盘底色。实测两个皮肤：
+
+    | 皮肤 | 有子 | 空位 |
+    |---|---|---|
+    | 深蓝底白子 | 270~679 | 16~46 |
+    | 浅绿立体子 | 451~946 | 11~38 |
+
+    比亮度可靠得多：浅色皮肤下「有子 138~171 / 空位 129~178」亮度完全重叠，
+    亮度判据直接失效（会把 30 个空位全判成有子），纹理却依然分得干干净净。
+    顺带把「落点光点」也挡住了——光晕是平滑的，纹理上不来。
+    """
+    k = max(3, int(cell * frac))
+    x = margin + f * cell
+    y = margin + r * cell
+    patch = rect[int(y) - k : int(y) + k, int(x) - k : int(x) + k]
+    if patch.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 def occupancy_threshold(values, tol=OCCUPANCY_TOL):
     """对全盘格中心亮度做「迭代两类中点」，得到有子/空位的自适应分界。
 
@@ -114,11 +138,11 @@ def occupancy_map(rect, cell, margin):
     两道判据同时成立才算有子：格中心够亮（原有），且外圈也够亮。后者专门
     挡「落点光点」——它只把中心点亮，撑不起整圈。
     """
-    lum = np.empty((RANKS, FILES), dtype=np.float64)
-    ring = np.empty((RANKS, FILES), dtype=np.float64)
+    tex = np.empty((RANKS, FILES), dtype=np.float64)
     for r in range(RANKS):
         for f in range(FILES):
-            lum[r, f] = center_luminance(rect, cell, margin, r, f)
-            ring[r, f] = ring_luminance(rect, cell, margin, r, f)
-    thr = occupancy_threshold(lum)
-    return (lum > thr) & (ring > thr)
+            tex[r, f] = texture_variance(rect, cell, margin, r, f)
+    # 纹理量级跨皮肤差很多（25 vs 382 vs 946），取对数后两类中点才稳
+    logged = np.log1p(tex)
+    thr = occupancy_threshold(logged.ravel())
+    return logged > thr

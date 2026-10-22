@@ -47,7 +47,10 @@ def rectify(image, corners, cell=140):
     )
     src = np.asarray(corners, dtype=np.float32)
     M = cv2.getPerspectiveTransform(src, dst)
-    rectified = cv2.warpPerspective(image, M, (W, H))
+    # 边缘复制而非默认的常数填充：棋盘最左/最右一列的棋子贴着屏幕边，
+    # 校正后窗口会伸到原图外，填黑会在这格里造出一块高反差区域，把棋子
+    # 认成别的（实测新皮肤两个红车因此漏检）。复制边缘像素就没有这个突变。
+    rectified = cv2.warpPerspective(image, M, (W, H), borderMode=cv2.BORDER_REPLICATE)
     return rectified, cell, margin
 
 
