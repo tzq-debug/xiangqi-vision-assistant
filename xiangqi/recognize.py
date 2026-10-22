@@ -236,6 +236,7 @@ def recognize_board(rectified, templates, cell, margin, repair=True):
     board_rows = _enforce_counts(
         board_rows, lambda r, f: confidences[r * FILES + f], score_maps
     )
+    board_rows = _ensure_kings(board_rows, occ, score_maps)
     return board_rows, confidences
 
 
@@ -324,3 +325,30 @@ def _deficit_target(rows, ch, score_maps, r, f):
         if sc > best_score and sc >= REBALANCE_MIN_SCORE:
             best, best_score = cand, sc
     return best
+
+def _ensure_kings(rows, occ, score_maps):
+    """返回新的一维行字符串列表（原传入的是不可变字符串，不能原地改）。"""
+    grid = [list(row) for row in rows]
+    """将/帅各只有一个，缺了整盘就没法算棋（FEN 直接非法、引擎会拒收）。
+
+    实测换皮肤重提模板后偶发「将帅都读成空」——占空和模板分都够，只是被外圈
+    判据挡掉。它俩是全盘最确定的两个子，缺失时按模板分在「判有子但没认出
+    字符」的格里补回来。
+    """
+    for king in ("K", "k"):
+        if any(ch == king for row in grid for ch in row):
+            continue
+        best = None
+        for r in range(RANKS):
+            for f in range(FILES):
+                # 不要求 occ 为真：换皮肤后占空偶尔把将帅判成空（亮度/暖度
+                # 都有余量，只是切分点偏了一点），而它俩的模板分是全盘最高的。
+                if grid[r][f] != " ":
+                    continue
+                idx = r * FILES + f
+                sc = (score_maps[idx] or {}).get(king, 0.0) if idx < len(score_maps) else 0.0
+                if best is None or sc > best[0]:
+                    best = (sc, r, f)
+        if best and best[0] >= 0.65:
+            grid[best[1]][best[2]] = king
+    return ["".join(row) for row in grid]

@@ -108,11 +108,44 @@ def occupancy_threshold(values, tol=OCCUPANCY_TOL):
     return t + tol
 
 
+def warmth_map(rect, cell, margin, frac=OCCUPANCY_FRAC):
+    """格中心区域的暖度（R−B 中位数）。
+
+    换皮肤时亮度这一路会整条失效：木黄棋盘配白盘棋子时「有子比空位亮」，
+    换成青灰棋盘配暖木牌棋子后两者亮度几乎重叠（166 vs 164，分离度 −38），
+    而 R−B 是 96 vs 14（+44）。所以两个特征都算，谁分得开用谁。
+    """
+    k = max(3, int(cell * frac))
+    out = np.empty((RANKS, FILES), dtype=np.float64)
+    for r in range(RANKS):
+        for f in range(FILES):
+            x = margin + f * cell
+            y = margin + r * cell
+            patch = rect[int(y) - k : int(y) + k, int(x) - k : int(x) + k]
+            if patch.size == 0:
+                out[r, f] = 0.0
+                continue
+            b, _, rr = [float(np.median(patch[:, :, i])) for i in range(3)]
+            out[r, f] = rr - b
+    return out
+
+
+def _split(feat):
+    """切一刀分成两簇，返回 (「数值更大」那侧的掩码, 两簇均值差)。"""
+    thr = occupancy_threshold(feat)
+    hi = feat > thr
+    n = feat.size
+    if hi.sum() == 0 or hi.sum() == n:
+        return hi, 0.0
+    return hi, float(abs(feat[hi].mean() - feat[~hi].mean()))
+
+
 def occupancy_map(rect, cell, margin):
     """整盘「每格是否真有棋子」的布尔表（屏幕坐标）。
 
-    两道判据同时成立才算有子：格中心够亮（原有），且外圈也够亮。后者专门
-    挡「落点光点」——它只把中心点亮，撑不起整圈。
+    自适应选特征：亮度和暖度各切一刀，取两簇分得更开的那个（换皮肤时
+    总有一个能用）。切出来的「多数簇」一律视为空位——棋子最多 32 个，
+    棋盘有 90 格，有子必然是少数。
     """
     lum = np.empty((RANKS, FILES), dtype=np.float64)
     ring = np.empty((RANKS, FILES), dtype=np.float64)
@@ -120,5 +153,17 @@ def occupancy_map(rect, cell, margin):
         for f in range(FILES):
             lum[r, f] = center_luminance(rect, cell, margin, r, f)
             ring[r, f] = ring_luminance(rect, cell, margin, r, f)
-    thr = occupancy_threshold(lum)
-    return (lum > thr) & (ring > thr)
+    warm = warmth_map(rect, cell, margin)
+
+    mask_l, sep_l = _split(lum)
+    mask_w, sep_w = _split(warm)
+    if sep_w > sep_l:
+        mask = mask_w
+        if mask.sum() > mask.size - mask.sum():
+            mask = ~mask
+        # 暖度本身就把光点排除了（光点是白的，R−B 很低），不必再叠加外圈判据
+        return mask
+    mask = mask_l & (ring > occupancy_threshold(lum))
+    if mask.sum() > mask.size - mask.sum():
+        return ~mask & (ring > occupancy_threshold(lum))
+    return mask
