@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from .board import LEGAL_SPOTS_ANY, MAX_PIECES, sanitize_positions
+from .board import MAX_PIECES, sanitize_positions
 from .calibrate import FILES, RANKS
 from .occupancy import occupancy_map
 
@@ -231,14 +231,12 @@ def recognize_board(rectified, templates, cell, margin, repair=True):
         board_rows.append(row)
     if repair:
         board_rows = repair_counts(board_rows, score_maps)
-    # repair 会在同色格之间互改，可能把士挪到九宫外。顺序很关键：
-    # ① 数量超限先改判/清理 → ② 位置非法的先尝试改判（别直接删，否则凭空少子）
-    # → ③ 最后才做合法性兜底清理。
+    # repair 会在同色格之间互改，可能把士挪到九宫外，所以合法性清理放最后
+    board_rows, _ = sanitize_positions(board_rows)
     board_rows = _enforce_counts(
         board_rows, lambda r, f: confidences[r * FILES + f], score_maps
     )
-    board_rows = _rescue_illegal(board_rows, score_maps)
-    board_rows, _ = sanitize_positions(board_rows)
+    board_rows = _ensure_kings(board_rows, occ, score_maps)
     return board_rows, confidences
 
 
@@ -328,33 +326,29 @@ def _deficit_target(rows, ch, score_maps, r, f):
             best, best_score = cand, sc
     return best
 
-def _rescue_illegal(rows, score_maps, min_score=REBALANCE_MIN_SCORE):
-    """位置非法的棋子先试着「改判」，别急着删。
+def _ensure_kings(rows, occ, score_maps):
+    """返回新的一维行字符串列表（原传入的是不可变字符串，不能原地改）。"""
+    grid = [list(row) for row in rows]
+    """将/帅各只有一个，缺了整盘就没法算棋（FEN 直接非法、引擎会拒收）。
 
-    实测：红车被认成「仕」，而仕落在列 0 不合法，`sanitize_positions` 直接清掉，
-    盘面上就凭空少一个车（用户一眼看出）。但那一格的次选正是「车」（0.84 vs 0.85），
-    位置也合法——直接改判就还原了。改判不了才清空。
+    实测换皮肤重提模板后偶发「将帅都读成空」——占空和模板分都够，只是被外圈
+    判据挡掉。它俩是全盘最确定的两个子，缺失时按模板分在「判有子但没认出
+    字符」的格里补回来。
     """
-    for r in range(RANKS):
-        for f in range(FILES):
-            ch = rows[r][f]
-            if ch == " ":
-                continue
-            spots = LEGAL_SPOTS_ANY.get(ch)
-            if spots is None or (r, f) in spots:
-                continue
-            sc = score_maps[r * FILES + f] or {}
-            best, best_sc = None, 0.0
-            for alt, val in sc.items():
-                if alt == " " or alt == ch:
+    for king in ("K", "k"):
+        if any(ch == king for row in grid for ch in row):
+            continue
+        best = None
+        for r in range(RANKS):
+            for f in range(FILES):
+                # 不要求 occ 为真：换皮肤后占空偶尔把将帅判成空（亮度/暖度
+                # 都有余量，只是切分点偏了一点），而它俩的模板分是全盘最高的。
+                if grid[r][f] != " ":
                     continue
-                alt_spots = LEGAL_SPOTS_ANY.get(alt)
-                if alt_spots is not None and (r, f) not in alt_spots:
-                    continue
-                # 只在同色之间改判：红黑互换是另一类错误，不该在这里悄悄发生
-                if alt.isupper() != ch.isupper():
-                    continue
-                if val > best_sc and val >= min_score:
-                    best, best_sc = alt, val
-            rows[r][f] = best if best else " "
-    return rows
+                idx = r * FILES + f
+                sc = (score_maps[idx] or {}).get(king, 0.0) if idx < len(score_maps) else 0.0
+                if best is None or sc > best[0]:
+                    best = (sc, r, f)
+        if best and best[0] >= 0.65:
+            grid[best[1]][best[2]] = king
+    return ["".join(row) for row in grid]

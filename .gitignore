@@ -28,3 +28,5 @@ _*.png
 *.bak
 templates_hi/
 docs/reference/*.jpg
+templates_old_bg/
+templates_new/

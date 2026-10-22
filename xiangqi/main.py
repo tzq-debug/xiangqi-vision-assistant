@@ -498,10 +498,20 @@ def main(
 
             # ---- 开局：识别 + 自动定向，建立可信盘面 ----
             if tracker is None:
-                std, flip, matches = detect_orientation(
-                    rect, templates, cell, margin,
-                    prefer_flip=cfg.get("flip_board"),
-                )
+                # 精修给出的四角仍可能差一两像素：换皮肤后实测「离线 90/90、
+                # 运行时 87/90」，差的就是顶部一行三个子（将+双象）。建盘只有
+                # 一次机会，所以在精修值附近枚举几组微调，取与开局最吻合的。
+                best = None
+                for dy0, dy1 in ((0, 0), (-2, 0), (2, 0), (0, -2), (0, 2),
+                                 (-2, -2), (2, 2), (-1, 0), (1, 0)):
+                    trial = [[x, y + (dy0 if i < 2 else dy1)] for i, (x, y) in enumerate(corners)]
+                    r2, c2, m2 = rectify(img, trial)
+                    s2, f2, mt = detect_orientation(
+                        r2, templates, c2, m2, prefer_flip=cfg.get("flip_board")
+                    )
+                    if best is None or mt > best[2]:
+                        best = (s2, f2, mt, trial, r2, c2, m2)
+                std, flip, matches, corners, rect, cell, margin = best
                 # 中局与开局的匹配数会随步数自然下降（每步差 2~4 格），
                 # 只有低到「方向都判不准」的程度才值得告警。
                 # 用「棋子清点」判识别是否可信：中局本来就离开局很远（实测真机
