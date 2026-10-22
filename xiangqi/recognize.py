@@ -236,6 +236,7 @@ def recognize_board(rectified, templates, cell, margin, repair=True):
     board_rows = _enforce_counts(
         board_rows, lambda r, f: confidences[r * FILES + f], score_maps
     )
+    board_rows = _deficit_swap(board_rows, score_maps)
     board_rows = _ensure_kings(board_rows, occ, score_maps)
     return board_rows, confidences
 
@@ -351,4 +352,49 @@ def _ensure_kings(rows, occ, score_maps):
                     best = (sc, r, f)
         if best and best[0] >= 0.65:
             grid[best[1]][best[2]] = king
+    return ["".join(row) for row in grid]
+
+def _deficit_swap(rows, score_maps, max_gap=0.06):
+    """某方某类棋子「没满」时，把同类里已满、且分数几乎打平的那格改判过来。
+
+    实测红方 (7,5) 的车被读成炮：R 0.72 / C 0.74，红方于是「车 1、炮 2」——
+    两个数都在上限内，数量约束（只在超量时触发）完全发现不了。而真被吃过车的
+    局面，炮那格的 R 分通常低得多，gap 会远大于 0.06，不会误改。
+    """
+    grid = [list(row) for row in rows]
+    for is_red in (True, False):
+        for _ in range(3):                       # 最多补三个，防止连锁误改
+            counts = {}
+            for r in range(RANKS):
+                for f in range(FILES):
+                    c = grid[r][f]
+                    if c != " " and c.isupper() == is_red:
+                        counts[c] = counts.get(c, 0) + 1
+            missing = [
+                (base if is_red else base.lower(), cap)
+                for base, cap in MAX_PIECES.items()
+                if counts.get(base if is_red else base.lower(), 0) < cap
+            ]
+            if not missing:
+                break
+            best = None
+            for want, _cap in missing:
+                for r in range(RANKS):
+                    for f in range(FILES):
+                        cur = grid[r][f]
+                        if cur == " " or cur.isupper() != is_red or cur == want:
+                            continue
+                        if counts.get(cur, 0) <= 1:  # 不能把某类的最后一颗改走
+                            continue
+                        idx = r * FILES + f
+                        sc = (score_maps[idx] or {}) if idx < len(score_maps) else {}
+                        gap = sc.get(cur, 0.0) - sc.get(want, 0.0)
+                        if gap > max_gap:
+                            continue
+                        if best is None or gap < best[0]:
+                            best = (gap, r, f, want, cur)
+            if best is None:
+                break
+            _, r, f, want, cur = best
+            grid[r][f] = want
     return ["".join(row) for row in grid]
