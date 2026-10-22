@@ -512,6 +512,27 @@ def main(
                     if best is None or mt > best[2]:
                         best = (s2, f2, mt, trial, r2, c2, m2)
                 std, flip, matches, corners, rect, cell, margin = best
+
+                # 多抓两帧再识别一次，取最准的：刚走过的棋子带强光晕，单帧会把
+                # 「俥」认成「仕」（实测该格所有模板分都掉到 0.5x、彼此只差 0.03），
+                # 而光晕一两帧后就消失，换帧往往直接对。
+                # 测试用固定帧序列（max_iterations 非空），多抓会打乱脚本帧
+                for _try in range(2 if max_iterations is None else 0):
+                    sleep(0.5)
+                    img_more = _read_image(grab())
+                    if img_more is None or img_more.shape[:2] != img.shape[:2]:
+                        break
+                    hm, wm = img_more.shape[:2]
+                    cs = [list(p_) for p_ in corners]
+                    if (wm, hm) != tuple(corner_size):
+                        cs = scale_corners(cs, corner_size, (wm, hm))
+                    r3, c3, m3 = rectify(img_more, cs)
+                    s3, f3, mt3 = detect_orientation(
+                        r3, templates, c3, m3, prefer_flip=cfg.get("flip_board")
+                    )
+                    if mt3 > matches:
+                        std, flip, matches = s3, f3, mt3
+                        rect, cell, margin = r3, c3, m3
                 # 中局与开局的匹配数会随步数自然下降（每步差 2~4 格），
                 # 只有低到「方向都判不准」的程度才值得告警。
                 # 用「棋子清点」判识别是否可信：中局本来就离开局很远（实测真机
