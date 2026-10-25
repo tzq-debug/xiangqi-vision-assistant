@@ -15,12 +15,12 @@ TEMPLATE_SIZE = 80
 # 所以不按格硬切，而是多留一圈余量做小范围滑动匹配，取最高分。
 # 实测：同一帧均分 0.78 → 0.94，格子偏移 5 像素以内都能对上。
 SEARCH_PAD_FRAC = 0.11   # 每边多留 0.11*cell 的搜索余量
-MATCH_THRESHOLD = 0.41   # 彩色模板匹配高于此分即为棋子
+MATCH_THRESHOLD = 0.20   # 彩色模板匹配高于此分即为棋子
 WARM_MIN_SCORE = 0.25    # 兵/炮等暖色圆面在暗角仍可接受的最低分
 WARM_RGB_GAP = 0.0       # 圆心 R-G 高于此判为暖色（兵/炮圆面偏红，棋盘偏绿/中性）
 WARM_PIECES = {"P", "p", "C", "c"}  # 暖色规则只对兵/炮生效，避免暖色色带误判士相马车
 OFFICERS = set("KABNkabn")          # 士相马车将帅：复杂字形，匹配分更高才可信
-OFFICER_MIN_SCORE = 0.55            # 车炮兵卒圆面简单，沿用 MATCH_THRESHOLD
+OFFICER_MIN_SCORE = 0.28            # 车炮兵卒圆面简单，沿用 MATCH_THRESHOLD
 
 REPAIR_MAX_LOSS = 0.12   # 纠错时允许「次选分比首选低多少」，超过就不动
 REPAIR_TRUST = 0.80      # 首选分高于此的格子视为有把握，绝不改动
@@ -34,10 +34,15 @@ RED_INK_MIN = 60.0
 
 # 占空图判「有子」但模板最高分低于此值时，判为光点/残影而不是棋子。
 # 实测真棋子最低 0.55（将帅），落点光点 0.42。
-GHOST_MAX_SCORE = 0.50
+# 只比「字」所在的中心区域：整格 80x80 里圆盘和木纹占了大部分像素，
+# 真印章式的文字只占中间一小块，导致车/马/炮这些同色棋子的模板分只差 0.01。
+# 裁到中心 65% 后，实测八颗子辨认 5/8 → 7/8，正确项的领先幅度从 0.03 升到 0.15+。
+INK_CROP_FRAC = 0.65
+
+GHOST_MAX_SCORE = 0.20
 # 超量棋子要「改判」而不是删掉时，次选分必须够高：真棋子错认时次选通常 0.8+，
 # 落点光点那种假棋子次选分很低，仍应直接清掉。
-REBALANCE_MIN_SCORE = 0.70
+REBALANCE_MIN_SCORE = 0.35
 
 
 def _ink_redness(rectified, cell, margin, r, f):
@@ -94,12 +99,19 @@ def _scores(window, templates, cell):
     warm = (r - g) > WARM_RGB_GAP
 
     size = max(TEMPLATE_SIZE, int(round(w * TEMPLATE_SIZE / float(cell))))
-    small = _prep(cv2.resize(window, (size, size)))
+    small = _crop_ink(_prep(cv2.resize(window, (size, size))))
     out = {}
     for ch, tmpl in templates.items():
-        res = cv2.matchTemplate(small, _prep(tmpl), cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(small, _crop_ink(_prep(tmpl)), cv2.TM_CCOEFF_NORMED)
         out[ch] = float(res.max())
     return out, warm
+
+
+def _crop_ink(img, frac=INK_CROP_FRAC):
+    """裁掉四周的圆盘/背景，只留中间的棋子文字。"""
+    h, w = img.shape[:2]
+    d = int(min(h, w) * (1.0 - frac) / 2)
+    return img[d:h - d, d:w - d] if d > 0 else img
 
 
 def _decide(scores, warm):
