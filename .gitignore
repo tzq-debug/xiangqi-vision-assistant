@@ -30,3 +30,5 @@ templates_hi/
 docs/reference/*.jpg
 templates_old_bg/
 templates_new/
+shot_*.png
+recognized_overlay.png
