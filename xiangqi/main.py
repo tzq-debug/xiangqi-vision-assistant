@@ -345,6 +345,10 @@ def main(
     """
     global _RUN_STARTED
     _RUN_STARTED = time.time()
+    # 首次建盘枚举出的四角（归一化到 0~1），之后的重建直接复用：
+    # 同一台手机同一分辨率下棋盘位置不会变，没必要每次都重跑 9 组枚举。
+    corner_cache = {}
+
     # 供 Web/UI 层订阅的运行状态（on_state 回调，每帧变化时推一次）
     state = {
         "status": "starting",        # starting/waiting/ready/frozen/error
@@ -474,8 +478,8 @@ def main(
                 tracker = None
                 push(status="starting", message="正在重新识别盘面…")
                 print(f"[{_clock()}] 收到界面请求：重新识别盘面")
-                sleep(interval)
-                continue
+                # 不 sleep/continue：本帧的截图已经抓好，直接落到下面的建盘流程，
+                # 省掉一整帧（hdc 抓图约 0.35s + interval 0.4s ≈ 0.75s）。
 
             # ---- 矫正（首帧尝试网格精修：标定四角往往含棋盘外框，
             #      比真实交叉点网格约大半格，不修则采样整体偏心）----
@@ -483,7 +487,11 @@ def main(
             if corner_size and (w_img, h_img) != tuple(corner_size):
                 corners = scale_corners(corners, corner_size, (w_img, h_img))
                 corner_size = (w_img, h_img)
-            if tracker is None and not grid_refined and iterations >= grid_next_retry:
+            # 精修只在本进程「首次建盘」时做一次：成功就把四角缓存下来，
+            # 之后的重建（点重新识别、追踪失联）直接用缓存值——精修本身
+            # 要 2~3 秒，每次重建都重跑是「重新识别很慢」的主因。
+            if (tracker is None and not grid_refined and iterations >= grid_next_retry
+                    and not corner_cache):
                 rect, cell, margin, corners, fit = refine_rectify(img, corners)
                 if fit is None:
                     # 关键：失败也要排重试。棋子太少（残局）时拟合不出网格，
@@ -501,23 +509,38 @@ def main(
                 # 精修给出的四角仍可能差一两像素：换皮肤后实测「离线 90/90、
                 # 运行时 87/90」，差的就是顶部一行三个子（将+双象）。建盘只有
                 # 一次机会，所以在精修值附近枚举几组微调，取与开局最吻合的。
-                best = None
-                for dy0, dy1 in ((0, 0), (-2, 0), (2, 0), (0, -2), (0, 2),
-                                 (-2, -2), (2, 2), (-1, 0), (1, 0)):
-                    trial = [[x, y + (dy0 if i < 2 else dy1)] for i, (x, y) in enumerate(corners)]
+                h, w = img.shape[:2]
+                cached_norm = corner_cache.get("norm")
+                if cached_norm:
+                    # 本进程已经成功建过一次盘：直接复用那次定下来的四角，
+                    # 省掉 9 组枚举（每组一次全盘识别，约 1.3 秒）。
+                    trial = [[nx * w, ny * h] for nx, ny in cached_norm]
                     r2, c2, m2 = rectify(img, trial)
-                    s2, f2, mt = detect_orientation(
+                    std, flip, matches = detect_orientation(
                         r2, templates, c2, m2, prefer_flip=cfg.get("flip_board")
                     )
-                    if best is None or mt > best[2]:
-                        best = (s2, f2, mt, trial, r2, c2, m2)
-                std, flip, matches, corners, rect, cell, margin = best
+                    corners, rect, cell, margin = trial, r2, c2, m2
+                else:
+                    best = None
+                    for dy0, dy1 in ((0, 0), (-2, 0), (2, 0), (0, -2), (0, 2),
+                                     (-2, -2), (2, 2), (-1, 0), (1, 0)):
+                        trial = [[x, y + (dy0 if i < 2 else dy1)] for i, (x, y) in enumerate(corners)]
+                        r2, c2, m2 = rectify(img, trial)
+                        s2, f2, mt = detect_orientation(
+                            r2, templates, c2, m2, prefer_flip=cfg.get("flip_board")
+                        )
+                        if best is None or mt > best[2]:
+                            best = (s2, f2, mt, trial, r2, c2, m2)
+                    std, flip, matches, corners, rect, cell, margin = best
+                    corner_cache["norm"] = [[x / w, y / h] for x, y in corners]
 
                 # 多抓两帧再识别一次，取最准的：刚走过的棋子带强光晕，单帧会把
                 # 「俥」认成「仕」（实测该格所有模板分都掉到 0.5x、彼此只差 0.03），
                 # 而光晕一两帧后就消失，换帧往往直接对。
                 # 测试用固定帧序列（max_iterations 非空），多抓会打乱脚本帧
-                for _try in range(2 if max_iterations is None else 0):
+                # 只在「有盘面但没对全」时抓帧（88 > matches > 20）。棋子太少说明
+                # 不在对局或已是残局，抓帧也救不了，白等 1 秒。
+                for _try in range(2 if (max_iterations is None and 20 < matches < 88) else 0):
                     sleep(0.5)
                     img_more = _read_image(grab())
                     if img_more is None or img_more.shape[:2] != img.shape[:2]:
